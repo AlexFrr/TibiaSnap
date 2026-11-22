@@ -1,0 +1,35 @@
+# Builds TibiaSnap.exe on GitHub's Windows machine and publishes it as a release.
+# Trigger: push a tag like v1.2.0   (git tag v1.2.0 && git push origin v1.2.0)
+# Every running TibiaSnap checks the latest release and updates itself.
+name: Build & release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build TibiaSnap.exe
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $parts = $ver.Split('.')
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $full = ($parts[0..3] -join '.')
+          (Get-Content TibiaSnap.cs) -replace 'AssemblyVersion\("[^"]*"\)', "AssemblyVersion(""$full"")" | Set-Content TibiaSnap.cs
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          & $csc /nologo /target:winexe /optimize+ /out:TibiaSnap.exe /win32icon:TibiaSnap.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll TibiaSnap.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TibiaSnap.exe
+          generate_release_notes: true
