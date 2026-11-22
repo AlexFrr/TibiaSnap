@@ -22,7 +22,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("TibiaSnap")]
 [assembly: System.Reflection.AssemblyProduct("TibiaSnap")]
-[assembly: System.Reflection.AssemblyVersion("1.4.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.5.0.0")]
 
 namespace TibiaSnap
 {
@@ -33,6 +33,11 @@ namespace TibiaSnap
     {
         public static readonly string[][] Entries =
         {
+            new string[] { "1.5.0",
+                "Right-click while dragging now only cancels the box. Right-click again (or without a box) closes the viewer.",
+                "New: Ctrl + your screenshot key (e.g. Ctrl+End) opens your latest screenshot without taking a new one.",
+                "See-through mode: the screenshot is now a bit grey and darker with a gold frame, so you can tell it apart from the live game. The area you mark stays in full colour.",
+                "The hint at the top now sits on the screenshot itself instead of the top of the monitor." },
             new string[] { "1.4.3",
                 "The area you're marking is now always fully solid (100%) - only the rest of the screenshot is see-through.",
                 "Fixed the marked area sometimes showing up see-through.",
@@ -359,6 +364,7 @@ namespace TibiaSnap
     {
         public Bitmap Original;      // full resolution, used for cropping
         public Bitmap Scaled;        // already fitted to the screen, so drawing is instant
+        public Bitmap Dim;           // see-through: slightly grey + darker, so you can tell it apart from the live game
         public Rectangle ScreenBounds;
         public Rectangle ImageRect;  // where Scaled sits inside the window
         public float ScaleX, ScaleY;
@@ -366,7 +372,7 @@ namespace TibiaSnap
 
         // target = where to put the image inside 'screen' (e.g. exactly over Tibia's game area);
         // Rectangle.Empty = fit to the whole screen
-        public static PreparedImage Load(string path, Rectangle screen, Rectangle target)
+        public static PreparedImage Load(string path, Rectangle screen, Rectangle target, bool makeDim)
         {
             Bitmap orig = null;
             try
@@ -404,6 +410,7 @@ namespace TibiaSnap
                 PreparedImage p = new PreparedImage();
                 p.Original = orig;
                 p.Scaled = scaled;
+                if (makeDim) p.Dim = MakeDim(scaled);
                 p.ScaleX = (float)w / orig.Width;
                 p.ScaleY = (float)h / orig.Height;
                 p.Path = path;
@@ -418,6 +425,31 @@ namespace TibiaSnap
             }
         }
 
+        // 35% colour, 80% brightness
+        static Bitmap MakeDim(Bitmap src)
+        {
+            const float sat = 0.35f, bright = 0.80f;
+            const float lr = 0.299f, lg = 0.587f, lb = 0.114f;
+            float[][] m =
+            {
+                new float[] { ((1 - sat) * lr + sat) * bright, (1 - sat) * lr * bright, (1 - sat) * lr * bright, 0, 0 },
+                new float[] { (1 - sat) * lg * bright, ((1 - sat) * lg + sat) * bright, (1 - sat) * lg * bright, 0, 0 },
+                new float[] { (1 - sat) * lb * bright, (1 - sat) * lb * bright, ((1 - sat) * lb + sat) * bright, 0, 0 },
+                new float[] { 0, 0, 0, 1, 0 },
+                new float[] { 0, 0, 0, 0, 1 }
+            };
+            Bitmap dim = new Bitmap(src.Width, src.Height, PixelFormat.Format32bppPArgb);
+            using (Graphics g = Graphics.FromImage(dim))
+            using (ImageAttributes ia = new ImageAttributes())
+            {
+                ia.SetColorMatrix(new ColorMatrix(m));
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.DrawImage(src, new Rectangle(0, 0, src.Width, src.Height), 0, 0, src.Width, src.Height, GraphicsUnit.Pixel, ia);
+            }
+            return dim;
+        }
+
         // full decode into memory, so the file isn't locked; throws while Tibia is still writing
         public static Bitmap LoadOriginal(string path)
         {
@@ -430,6 +462,7 @@ namespace TibiaSnap
         {
             if (Original != null) { Original.Dispose(); Original = null; }
             if (Scaled != null) { Scaled.Dispose(); Scaled = null; }
+            if (Dim != null) { Dim.Dispose(); Dim = null; }
         }
     }
 
@@ -460,6 +493,7 @@ namespace TibiaSnap
         static readonly SolidBrush Shade = new SolidBrush(Color.FromArgb(140, 0, 0, 0));
         static readonly SolidBrush PillBrush = new SolidBrush(Color.FromArgb(190, 20, 20, 24));
         static readonly Pen SelPen = new Pen(Color.FromArgb(255, 232, 178, 54), 2f);
+        static readonly Pen FramePen = new Pen(Color.FromArgb(255, 232, 178, 54), 3f);
 
         const int WS_EX_NOACTIVATE = 0x08000000;
 
@@ -515,7 +549,13 @@ namespace TibiaSnap
                 bars.Exclude(ir);
                 g.FillRegion(Brushes.Black, bars);
             }
-            g.DrawImage(img.Scaled, ir);
+            g.DrawImage(img.Dim ?? img.Scaled, ir);
+            if (seeThrough)
+            {
+                g.CompositingMode = CompositingMode.SourceOver;
+                g.PixelOffsetMode = PixelOffsetMode.Default;
+                g.DrawRectangle(FramePen, ir.X + 1, ir.Y + 1, ir.Width - 3, ir.Height - 3); // "this is the screenshot" frame
+            }
 
             g.CompositingMode = CompositingMode.SourceOver;
             g.PixelOffsetMode = PixelOffsetMode.Default;
@@ -539,12 +579,12 @@ namespace TibiaSnap
             }
             else if (showHint && hintVisible)
             {
-                string close = keepFocus ? "Right-click = close" : "Esc = close";
+                string close = keepFocus ? "Right-click = close" : "Esc / right-click = close";
                 string whole = keepFocus ? "Double-click = whole screenshot" : "Enter = whole screenshot";
                 string hint = cropEnabled
                     ? "Drag to copy a part   \u00B7   " + whole + "   \u00B7   " + close
                     : (keepFocus ? "Double-click = copy screenshot" : "Enter = copy screenshot") + "   \u00B7   " + close;
-                DrawPill(g, hint, HintFont, new Point(ClientSize.Width / 2, 18), true);
+                DrawPill(g, hint, HintFont, new Point(ir.X + ir.Width / 2, ir.Y + 18), true);
             }
         }
 
@@ -582,6 +622,7 @@ namespace TibiaSnap
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Right && dragging) { CancelDrag(); return; } // 1st right-click: drop the box
             if (e.Button == MouseButtons.Right || e.Button == MouseButtons.Middle) { Close(); return; }
             if (e.Button == MouseButtons.Left && cropEnabled && e.Clicks == 1)
             {
@@ -596,6 +637,15 @@ namespace TibiaSnap
                 }
                 Invalidate(); // whole screen changes once (shade / hint gone)
             }
+        }
+
+        void CancelDrag()
+        {
+            dragging = false;
+            sel = Rectangle.Empty;
+            if (selWin != null) selWin.Hide();
+            hintVisible = true;
+            Invalidate();
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -1090,7 +1140,7 @@ namespace TibiaSnap
         Control invoker; // to get back onto the UI thread
         Settings settings;
 
-        ToolStripMenuItem enabledItem, viewerItem, saveCropsItem, autostartItem, hotkeyItem;
+        ToolStripMenuItem enabledItem, viewerItem, saveCropsItem, autostartItem, hotkeyItem, openLatestItem;
         ToolStripMenuItem cropMenu, monitorMenu, pressMenu, seeMenu, seeOff, seePlay, seeCustom;
 
         ViewerForm currentViewer;
@@ -1237,7 +1287,8 @@ namespace TibiaSnap
             menu.Items.Add("Change screenshot folder...", null, (s, e) => ChooseFolder());
             menu.Items.Add("Open screenshot folder", null, (s, e) => OpenFolder());
             menu.Items.Add("Open saved crops", null, (s, e) => OpenCropsFolder());
-            menu.Items.Add("Open latest screenshot", null, (s, e) => OpenLatestNow());
+            openLatestItem = new ToolStripMenuItem("Open latest screenshot", null, (s, e) => OpenLatestNow());
+            menu.Items.Add(openLatestItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("Check for updates", null, (s, e) => CheckForUpdates(true));
             menu.Items.Add("What's new", null, (s, e) => new WhatsNewForm("TibiaSnap - What's new", ChangeLog.All()).Show());
@@ -1345,7 +1396,14 @@ namespace TibiaSnap
         void OnTick(object sender, EventArgs e)
         {
             bool down = IsDown((int)settings.HotkeyKey);
-            if (down && !keyWasDown && settings.Enabled && !busy && ModifiersMatch() && TibiaIsActive())
+            bool pressed = down && !keyWasDown && settings.Enabled;
+            if (pressed && ModifiersMatch(LatestMods) && TibiaIsActive())
+            {
+                // Ctrl + your key: open the latest screenshot without taking a new one
+                RememberTibiaArea();
+                OpenLatestNow();
+            }
+            else if (pressed && !busy && ModifiersMatch(settings.HotkeyMods) && TibiaIsActive())
             {
                 busy = true;
                 DateTime pressedUtc = DateTime.UtcNow;
@@ -1427,9 +1485,23 @@ namespace TibiaSnap
             return (GetAsyncKeyState(vk) & 0x8000) != 0;
         }
 
-        bool ModifiersMatch()
+        // hotkey + Ctrl (or + Shift if your hotkey already uses Ctrl)
+        Keys LatestMods
         {
-            Keys m = settings.HotkeyMods;
+            get
+            {
+                Keys m = settings.HotkeyMods;
+                return (m & Keys.Control) == 0 ? m | Keys.Control : m | Keys.Shift;
+            }
+        }
+
+        string LatestName
+        {
+            get { return new KeysConverter().ConvertToString(settings.HotkeyKey | LatestMods); }
+        }
+
+        bool ModifiersMatch(Keys m)
+        {
             return IsDown(VK_CONTROL) == ((m & Keys.Control) != 0)
                 && IsDown(VK_SHIFT) == ((m & Keys.Shift) != 0)
                 && IsDown(VK_MENU) == ((m & Keys.Alt) != 0);
@@ -1583,7 +1655,7 @@ namespace TibiaSnap
             Exception last = null;
             for (int i = 0; i < 120 && p == null; i++) // Tibia may still be writing it
             {
-                try { p = PreparedImage.Load(path, screen, target); }
+                try { p = PreparedImage.Load(path, screen, target, SeeThroughActive); }
                 catch (Exception ex) { last = ex; Thread.Sleep(25); }
             }
             if (p == null) throw new Exception("couldn't read the screenshot (" + (last != null ? last.Message : "?") + ")");
@@ -1808,6 +1880,7 @@ namespace TibiaSnap
             string t = settings.Enabled ? "TibiaSnap - " + settings.HotkeyName + " in Tibia opens screenshot" : "TibiaSnap - paused";
             if (tray != null) tray.Text = t.Length > 63 ? t.Substring(0, 63) : t;
             if (hotkeyItem != null) hotkeyItem.Text = "Change hotkey (now: " + settings.HotkeyName + ")...";
+            if (openLatestItem != null) openLatestItem.Text = "Open latest screenshot (" + LatestName + " in Tibia)";
         }
 
         void ExitApp()
