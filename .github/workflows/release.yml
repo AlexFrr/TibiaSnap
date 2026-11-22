@@ -1,11 +1,16 @@
-# Builds TibiaSnap.exe on GitHub's Windows machine and publishes it as a release.
-# Trigger: push a tag like v1.2.0   (git tag v1.2.0 && git push origin v1.2.0)
+# Builds TibiaSnap.exe on GitHub's Windows machine and publishes a release.
+#
+# How to release: bump AssemblyVersion in TibiaSnap.cs (and add a ChangeLog entry),
+# then push to main. If there's no release for that version yet, this builds the
+# exe and publishes release vX.Y.Z with the changelog as notes.
 # Every running TibiaSnap checks the latest release and updates itself.
 name: Build & release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths: ['TibiaSnap.cs', 'TibiaSnap.ico', '.github/workflows/release.yml']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,20 +21,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read version + check if already released
+        id: ver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $m = Select-String -Path TibiaSnap.cs -Pattern 'AssemblyVersion\("(\d+)\.(\d+)\.(\d+)' | Select-Object -First 1
+          $g = $m.Matches[0].Groups
+          $v = "$($g[1].Value).$($g[2].Value).$($g[3].Value)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          gh release view "v$v" *> $null
+          if ($LASTEXITCODE -eq 0) { "exists=true" >> $env:GITHUB_OUTPUT; Write-Host "v$v already released - nothing to do" }
+          else { "exists=false" >> $env:GITHUB_OUTPUT; Write-Host "Releasing v$v" }
+
+          # release notes = this version's ChangeLog entry from TibiaSnap.cs
+          $lines = Get-Content TibiaSnap.cs
+          $hit = $lines | Select-String -SimpleMatch "new string[] { `"$v`"," | Select-Object -First 1
+          $notes = @()
+          if ($hit) {
+            for ($i = $hit.LineNumber; $i -lt $lines.Count; $i++) {
+              $l = $lines[$i].Trim()
+              if ($l -match '^"(.*)"\s*(,|\},?)\s*$') { $notes += "- " + (($matches[1] -replace '\\"', '"') -replace '\\\\', '\') }
+              if ($l -match '\}\s*,?\s*$') { break }
+            }
+          }
+          if ($notes.Count -eq 0) { $notes = @("- Update") }
+          ($notes -join "`n") | Set-Content notes.md
+          exit 0
+
       - name: Build TibiaSnap.exe
+        if: steps.ver.outputs.exists == 'false'
         shell: pwsh
         run: |
-          $ver = "${{ github.ref_name }}".TrimStart('v')
-          $parts = $ver.Split('.')
-          while ($parts.Count -lt 4) { $parts += '0' }
-          $full = ($parts[0..3] -join '.')
-          (Get-Content TibiaSnap.cs) -replace 'AssemblyVersion\("[^"]*"\)', "AssemblyVersion(""$full"")" | Set-Content TibiaSnap.cs
           $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
           & $csc /nologo /target:winexe /optimize+ /out:TibiaSnap.exe /win32icon:TibiaSnap.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll TibiaSnap.cs
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Publish release
+        if: steps.ver.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: TibiaSnap v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: notes.md
           files: TibiaSnap.exe
-          generate_release_notes: true

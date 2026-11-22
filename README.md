@@ -10,8 +10,8 @@ In Tibia, bind **Take Screenshot** to the same key as TibiaSnap (tray icon → *
 It updates itself.
 
 ## Releasing a new version
-1. Change `TibiaSnap.cs` and push it.
-2. Tag it: `git tag v1.2.0` then `git push origin v1.2.0`
-3. GitHub builds the exe and publishes the release. Everyone's TibiaSnap updates within a few hours (or right away via tray → *Check for updates*).
+1. In `TibiaSnap.cs`, raise `AssemblyVersion` (e.g. `1.3.0.0`) and add an entry at the top of `ChangeLog` – that's what people see in the *What's new* window.
+2. Push to `main`.
+3. GitHub builds the exe and publishes release `v1.3.0` by itself. Everyone's TibiaSnap updates within a few hours (or right away via tray → *Check for updates*).
 
 Local build without GitHub: run `BUILD.bat`.
