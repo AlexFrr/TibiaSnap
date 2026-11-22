@@ -22,7 +22,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("TibiaSnap")]
 [assembly: System.Reflection.AssemblyProduct("TibiaSnap")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
 
 namespace TibiaSnap
 {
@@ -33,6 +33,11 @@ namespace TibiaSnap
     {
         public static readonly string[][] Entries =
         {
+            new string[] { "1.3.0",
+                "Opens a lot faster: no more slow folder scan on every key press, and the screenshot is prepared quicker.",
+                "New: choose what happens when you press the key (tray > When I press the key): open the crop window, just copy the whole screenshot to your clipboard, or keep it for later so nothing pops up mid-hunt.",
+                "Double-click the tray icon to crop your latest screenshot anytime.",
+                "Small messages (like 'Copied') now show as a little box in the corner that never steals focus from Tibia, and can't be hidden by Windows notification settings." },
             new string[] { "1.2.0",
                 "New built-in crop: drag a box over the screenshot and it's copied to your clipboard instantly. No more waiting for the Windows Snipping Tool.",
                 "Enter or double-click copies the whole screenshot.",
@@ -222,6 +227,7 @@ namespace TibiaSnap
         public bool OwnViewer = true;
         public string CropMode = "builtin";   // builtin | snip | none
         public bool SaveCrops = true;
+        public string OnPress = "viewer";     // viewer | copy | later
         public string Monitor = "mouse";      // mouse | primary | \\.\DISPLAYn
         public Keys HotkeyKey = Keys.End;
         public Keys HotkeyMods = Keys.None;
@@ -275,6 +281,7 @@ namespace TibiaSnap
                         else if (key == "CropMode" && (val == "builtin" || val == "snip" || val == "none")) { s.CropMode = val; hasCropMode = true; }
                         else if (key == "AutoSnip") legacyNoSnip = val == "0";
                         else if (key == "SaveCrops") s.SaveCrops = val == "1";
+                        else if (key == "OnPress" && (val == "viewer" || val == "copy" || val == "later")) s.OnPress = val;
                         else if (key == "Monitor" && val.Length > 0) s.Monitor = val;
                         else if (key == "HotkeyKey") { if (int.TryParse(val, out n) && n > 0) s.HotkeyKey = (Keys)n; }
                         else if (key == "HotkeyMods") { if (int.TryParse(val, out n)) s.HotkeyMods = (Keys)n & Keys.Modifiers; }
@@ -297,6 +304,7 @@ namespace TibiaSnap
                     "OwnViewer=" + (OwnViewer ? "1" : "0"),
                     "CropMode=" + CropMode,
                     "SaveCrops=" + (SaveCrops ? "1" : "0"),
+                    "OnPress=" + OnPress,
                     "Monitor=" + Monitor,
                     "HotkeyKey=" + (int)HotkeyKey,
                     "HotkeyMods=" + (int)HotkeyMods
@@ -323,9 +331,7 @@ namespace TibiaSnap
             Bitmap orig = null;
             try
             {
-                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                using (Image tmp = Image.FromStream(fs, false, true))
-                    orig = new Bitmap(tmp); // full decode + no file lock
+                orig = LoadOriginal(path);
 
                 float scale = Math.Min((float)screen.Width / orig.Width, (float)screen.Height / orig.Height);
                 int w = Math.Max(1, (int)Math.Round(orig.Width * scale));
@@ -336,8 +342,8 @@ namespace TibiaSnap
                 using (ImageAttributes ia = new ImageAttributes())
                 {
                     g.InterpolationMode = (w == orig.Width && h == orig.Height) ? InterpolationMode.NearestNeighbor
-                        : scale < 1f ? InterpolationMode.HighQualityBicubic : InterpolationMode.HighQualityBilinear;
-                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        : InterpolationMode.Bilinear; // fast; crops still come from the full-res original
+                    g.PixelOffsetMode = PixelOffsetMode.HighSpeed;
                     g.CompositingMode = CompositingMode.SourceCopy;
                     ia.SetWrapMode(WrapMode.TileFlipXY); // no dark edges
                     g.DrawImage(orig, new Rectangle(0, 0, w, h), 0, 0, orig.Width, orig.Height, GraphicsUnit.Pixel, ia);
@@ -357,6 +363,14 @@ namespace TibiaSnap
                 if (orig != null) orig.Dispose();
                 throw;
             }
+        }
+
+        // full decode into memory, so the file isn't locked; throws while Tibia is still writing
+        public static Bitmap LoadOriginal(string path)
+        {
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (Image tmp = Image.FromStream(fs, false, true))
+                return new Bitmap(tmp);
         }
 
         public void Dispose()
@@ -547,22 +561,8 @@ namespace TibiaSnap
         // clipboard (as image + PNG for Discord etc.), then save in the background
         void Finish(Bitmap result)
         {
-            bool copied = false;
-            for (int i = 0; i < 3 && !copied; i++)
-            {
-                try
-                {
-                    DataObject d = new DataObject();
-                    d.SetImage(result);
-                    MemoryStream png = new MemoryStream();
-                    result.Save(png, ImageFormat.Png);
-                    d.SetData("PNG", false, png);
-                    Clipboard.SetDataObject(d, true);
-                    copied = true;
-                }
-                catch { Thread.Sleep(60); } // clipboard busy
-            }
-
+            Hide(); // get out of your way right away, copying can take a moment for big shots
+            bool copied = ClipboardHelper.SetImage(result);
             Close();
 
             bool save = saveCrops;
@@ -591,6 +591,105 @@ namespace TibiaSnap
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             img.Dispose();
+            base.OnFormClosed(e);
+        }
+    }
+
+    static class ClipboardHelper
+    {
+        // as a normal image + PNG (Discord etc. keep full quality). Must run on the UI thread.
+        public static bool SetImage(Bitmap img)
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                try
+                {
+                    DataObject d = new DataObject();
+                    d.SetImage(img);
+                    MemoryStream png = new MemoryStream();
+                    img.Save(png, ImageFormat.Png);
+                    d.SetData("PNG", false, png);
+                    Clipboard.SetDataObject(d, true);
+                    return true;
+                }
+                catch { Thread.Sleep(60); } // clipboard busy
+            }
+            return false;
+        }
+    }
+
+    // ======================================================================
+    // Small message box in the corner. Never takes focus away from Tibia and
+    // can't be hidden by Windows notification settings / Do Not Disturb.
+    // ======================================================================
+    class Toast : Form
+    {
+        const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+        static Toast current;
+        readonly System.Windows.Forms.Timer life;
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        // call on the UI thread
+        public static void Popup(string text, bool warning)
+        {
+            if (current != null && !current.IsDisposed) current.Close();
+            current = new Toast(text, warning);
+            current.Show();
+        }
+
+        Toast(string text, bool warning)
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            BackColor = Color.FromArgb(28, 28, 32);
+            Opacity = 0.94;
+
+            Panel accent = new Panel();
+            accent.Dock = DockStyle.Left;
+            accent.Width = 5;
+            accent.BackColor = warning ? Color.FromArgb(230, 90, 70) : Color.FromArgb(232, 178, 54);
+            Controls.Add(accent);
+
+            Label l = new Label();
+            l.AutoSize = true;
+            l.MaximumSize = new Size(420, 0);
+            l.Font = new Font("Segoe UI", 10f);
+            l.ForeColor = Color.White;
+            l.Text = text;
+            l.Location = new Point(16, 10);
+            Controls.Add(l);
+
+            Size pref = l.GetPreferredSize(new Size(420, 0));
+            ClientSize = new Size(pref.Width + 32, pref.Height + 20);
+
+            Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
+            Location = new Point(wa.Right - Width - 16, wa.Bottom - Height - 16);
+
+            l.Click += (s, e) => Close();
+            Click += (s, e) => Close();
+
+            life = new System.Windows.Forms.Timer();
+            life.Interval = warning ? 5000 : 2200;
+            life.Tick += (s, e) => { life.Stop(); Close(); };
+            life.Start();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            life.Stop();
+            life.Dispose();
             base.OnFormClosed(e);
         }
     }
@@ -720,7 +819,7 @@ namespace TibiaSnap
         Settings settings;
 
         ToolStripMenuItem enabledItem, viewerItem, saveCropsItem, autostartItem, hotkeyItem;
-        ToolStripMenuItem cropMenu, monitorMenu;
+        ToolStripMenuItem cropMenu, monitorMenu, pressMenu;
 
         ViewerForm currentViewer;
         bool keyWasDown;
@@ -746,7 +845,7 @@ namespace TibiaSnap
             tray.Icon = MakeIcon();
             tray.ContextMenuStrip = BuildMenu();
             tray.Visible = true;
-            tray.DoubleClick += (s, e) => OpenFolder();
+            tray.DoubleClick += (s, e) => OpenLatestNow();
             UpdateTooltip();
 
             if (autostartItem.Checked) SetAutostart(true); // keep path current if the exe moved
@@ -809,6 +908,13 @@ namespace TibiaSnap
             AddCropOption("Built-in crop (fast, copies to clipboard)", "builtin");
             AddCropOption("Windows Snipping Tool", "snip");
             AddCropOption("Nothing, just show the screenshot", "none");
+
+            // what the hotkey does
+            pressMenu = new ToolStripMenuItem("When I press the key");
+            AddPressOption("Open the crop window (default)", "viewer");
+            AddPressOption("Just copy the whole screenshot to clipboard", "copy");
+            AddPressOption("Nothing pops up - crop later (double-click tray icon)", "later");
+            menu.Items.Add(pressMenu);
             menu.Items.Add(cropMenu);
 
             // monitor (rebuilt every time the menu opens, in case monitors changed)
@@ -867,6 +973,23 @@ namespace TibiaSnap
                 }
             };
             cropMenu.DropDownItems.Add(it);
+        }
+
+        void AddPressOption(string label, string value)
+        {
+            ToolStripMenuItem it = new ToolStripMenuItem(label);
+            it.Checked = settings.OnPress == value;
+            it.Click += (s, e) =>
+            {
+                settings.OnPress = value;
+                settings.Save();
+                foreach (ToolStripItem other in pressMenu.DropDownItems)
+                {
+                    ToolStripMenuItem mi = other as ToolStripMenuItem;
+                    if (mi != null) mi.Checked = mi == it;
+                }
+            };
+            pressMenu.DropDownItems.Add(it);
         }
 
         void RebuildMonitorMenu()
@@ -1015,7 +1138,9 @@ namespace TibiaSnap
             {
                 DateTime threshold = pressedUtc.AddSeconds(-3);
                 DateTime deadline = DateTime.UtcNow.AddSeconds(15);
-                DateTime nextScan = DateTime.UtcNow; // one scan right away, then only as a fallback
+                // the watcher is instant; scanning the whole folder is slow with lots of
+                // screenshots, so only do it as a fallback (right away only if there's no watcher)
+                DateTime nextScan = watcher != null ? DateTime.UtcNow.AddMilliseconds(1500) : DateTime.UtcNow;
                 string found = null;
 
                 while (found == null && DateTime.UtcNow < deadline)
@@ -1038,15 +1163,15 @@ namespace TibiaSnap
                             found = f;
                             break;
                         }
-                        nextScan = DateTime.UtcNow.AddMilliseconds(watcher != null ? 1000 : 250);
+                        nextScan = DateTime.UtcNow.AddMilliseconds(watcher != null ? 1500 : 250);
                     }
-                    fileSignal.WaitOne(40);
+                    fileSignal.WaitOne(15);
                 }
 
                 if (found == null) return; // nothing new (e.g. Tibia ignored the key) - stay quiet
 
                 lastOpened = found;
-                OpenImage(found, screen);
+                OpenImage(found, screen, settings.OnPress);
             }
             catch (Exception ex)
             {
@@ -1058,9 +1183,34 @@ namespace TibiaSnap
             }
         }
 
-        // worker thread: load + pre-scale, then show on the UI thread
-        void OpenImage(string path, Rectangle screen)
+        // worker thread. mode: viewer | copy | later
+        void OpenImage(string path, Rectangle screen, string mode)
         {
+            if (mode == "later")
+            {
+                ShowTip("Screenshot saved - double-click the tray icon to crop it.", ToolTipIcon.Info);
+                return;
+            }
+
+            if (mode == "copy")
+            {
+                Bitmap bmp = null;
+                Exception lastErr = null;
+                for (int i = 0; i < 120 && bmp == null; i++) // Tibia may still be writing it
+                {
+                    try { bmp = PreparedImage.LoadOriginal(path); }
+                    catch (Exception ex) { lastErr = ex; Thread.Sleep(25); }
+                }
+                if (bmp == null) throw new Exception("couldn't read the screenshot (" + (lastErr != null ? lastErr.Message : "?") + ")");
+                invoker.BeginInvoke((Action)(() =>
+                {
+                    bool ok = ClipboardHelper.SetImage(bmp);
+                    bmp.Dispose();
+                    ShowTip(ok ? "Screenshot copied to clipboard" : "Couldn't use the clipboard", ToolTipIcon.Info);
+                }));
+                return;
+            }
+
             if (!settings.OwnViewer)
             {
                 WaitUntilWritten(path);
@@ -1071,10 +1221,10 @@ namespace TibiaSnap
 
             PreparedImage p = null;
             Exception last = null;
-            for (int i = 0; i < 60 && p == null; i++) // Tibia may still be writing it
+            for (int i = 0; i < 120 && p == null; i++) // Tibia may still be writing it
             {
                 try { p = PreparedImage.Load(path, screen); }
-                catch (Exception ex) { last = ex; Thread.Sleep(50); }
+                catch (Exception ex) { last = ex; Thread.Sleep(25); }
             }
             if (p == null) throw new Exception("couldn't read the screenshot (" + (last != null ? last.Message : "?") + ")");
 
@@ -1120,7 +1270,7 @@ namespace TibiaSnap
             Rectangle bounds = TargetScreenBounds(settings.Monitor);
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try { OpenImage(f, bounds); }
+                try { OpenImage(f, bounds, "viewer"); }
                 catch (Exception ex) { ShowTip("Something went wrong: " + ex.Message, ToolTipIcon.Error); }
             });
         }
@@ -1272,7 +1422,8 @@ namespace TibiaSnap
 
         void ShowTip(string text, ToolTipIcon icon)
         {
-            Action a = () => { if (tray != null) tray.ShowBalloonTip(3000, "TibiaSnap", text, icon); };
+            bool warn = icon == ToolTipIcon.Warning || icon == ToolTipIcon.Error;
+            Action a = () => Toast.Popup(text, warn);
             if (invoker.InvokeRequired) invoker.BeginInvoke(a);
             else a();
         }
