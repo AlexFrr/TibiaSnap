@@ -22,7 +22,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("TibiaSnap")]
 [assembly: System.Reflection.AssemblyProduct("TibiaSnap")]
-[assembly: System.Reflection.AssemblyVersion("1.4.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.3.0")]
 
 namespace TibiaSnap
 {
@@ -33,6 +33,10 @@ namespace TibiaSnap
     {
         public static readonly string[][] Entries =
         {
+            new string[] { "1.4.3",
+                "The area you're marking is now always fully solid (100%) - only the rest of the screenshot is see-through.",
+                "Fixed the marked area sometimes showing up see-through.",
+                "Custom see-through window fixed: text no longer gets cut off on scaled screens." },
             new string[] { "1.4.2",
                 "Play mode is now the default: the screenshot opens see-through (40%), the marked area stays 100%, and your keys stay in Tibia. You can switch back to solid under tray > See-through viewer." },
             new string[] { "1.4.1",
@@ -296,7 +300,7 @@ namespace TibiaSnap
                         else if (key == "SaveCrops") s.SaveCrops = val == "1";
                         else if (key == "OnPress" && (val == "viewer" || val == "copy" || val == "later")) s.OnPress = val;
                         else if (key == "ViewOpacity") { if (int.TryParse(val, out n)) s.ViewOpacity = Math.Max(10, Math.Min(100, n)); }
-                        else if (key == "SelOpacity") { if (int.TryParse(val, out n)) s.SelOpacity = Math.Max(10, Math.Min(100, n)); }
+                        else if (key == "SelOpacity") { } // marked area is always 100% now
                         else if (key == "KeepFocus") s.KeepFocus = val == "1";
                         else if (key == "PlayDefaultApplied") s.PlayDefaultApplied = val == "1";
                         else if (key == "Monitor" && val.Length > 0) s.Monitor = val;
@@ -700,7 +704,7 @@ namespace TibiaSnap
             get
             {
                 CreateParams cp = base.CreateParams;
-                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | 0x8 /*WS_EX_TOPMOST*/;
                 return cp;
             }
         }
@@ -718,6 +722,11 @@ namespace TibiaSnap
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque, true);
         }
 
+        [DllImport("user32.dll")]
+        static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        const uint SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
+
         // selClient = box inside the viewer, screenRect = same box in screen coordinates
         public void Place(Rectangle selClient, Rectangle screenRect)
         {
@@ -727,9 +736,16 @@ namespace TibiaSnap
                 if (Visible) Hide();
                 return;
             }
-            Bounds = screenRect;
-            if (!Visible) Show();
+            if (!Visible)
+            {
+                Bounds = screenRect;
+                Show();
+            }
+            // move + force it above the see-through viewer every time (topmost, no focus)
+            SetWindowPos(Handle, HWND_TOPMOST, screenRect.X, screenRect.Y, screenRect.Width, screenRect.Height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW);
             Invalidate();
+            Update(); // paint now, not "sometime later"
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -752,13 +768,13 @@ namespace TibiaSnap
     // ======================================================================
     class SeeThroughForm : Form
     {
-        public int ViewOpacity, SelOpacity;
+        public int ViewOpacity;
         public bool KeepFocus;
-        readonly TrackBar viewBar, selBar;
-        readonly Label viewLbl, selLbl;
+        readonly TrackBar viewBar;
+        readonly Label viewLbl;
         readonly CheckBox focusBox;
 
-        public SeeThroughForm(int view, int sel, bool keepFocus)
+        public SeeThroughForm(int view, bool keepFocus)
         {
             Text = "TibiaSnap - See-through viewer";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -766,75 +782,88 @@ namespace TibiaSnap
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             TopMost = true;
-            AutoScaleMode = AutoScaleMode.Font;
+            AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 9.5f);
-            ClientSize = new Size(440, 300);
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+
+            // everything stacked top to bottom and sized by Windows -> nothing can overlap
+            TableLayoutPanel t = new TableLayoutPanel();
+            t.ColumnCount = 1;
+            t.AutoSize = true;
+            t.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            t.Padding = new Padding(14);
+            t.Location = new Point(0, 0);
 
             Label info = new Label();
-            info.Text = "How visible the screenshot is. Lower = you see more of Tibia behind it.\nWhat you copy is always the full, normal screenshot.";
-            info.SetBounds(16, 12, 410, 40);
-            Controls.Add(info);
+            info.AutoSize = true;
+            info.MaximumSize = new Size(440, 0);
+            info.Margin = new Padding(3, 3, 3, 12);
+            info.Text = "How visible the screenshot is. Lower = you see more of Tibia behind it.\n" +
+                        "The area you're marking is always shown at 100%, and what you copy is always the normal screenshot.";
+            t.Controls.Add(info);
 
             viewLbl = new Label();
-            viewLbl.SetBounds(16, 60, 410, 20);
-            Controls.Add(viewLbl);
-            viewBar = MakeBar(16, 82, view);
-            viewBar.ValueChanged += (s, e) => UpdateLabels();
+            viewLbl.AutoSize = true;
+            viewLbl.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+            t.Controls.Add(viewLbl);
 
-            selLbl = new Label();
-            selLbl.SetBounds(16, 132, 410, 20);
-            Controls.Add(selLbl);
-            selBar = MakeBar(16, 154, sel);
-            selBar.ValueChanged += (s, e) => UpdateLabels();
+            viewBar = new TrackBar();
+            viewBar.Minimum = 2;   // 10%
+            viewBar.Maximum = 20;  // 100%
+            viewBar.TickFrequency = 2;
+            viewBar.SmallChange = 1;
+            viewBar.LargeChange = 2;
+            viewBar.Value = Math.Max(2, Math.Min(20, (int)Math.Round(view / 5.0)));
+            viewBar.Width = 440;
+            viewBar.Margin = new Padding(3, 3, 3, 10);
+            viewBar.ValueChanged += (s, e) => UpdateLabel();
+            t.Controls.Add(viewBar);
 
             focusBox = new CheckBox();
+            focusBox.AutoSize = true;
             focusBox.Text = "Keep my keyboard in Tibia while cropping (hotkeys keep working)";
             focusBox.Checked = keepFocus;
-            focusBox.SetBounds(16, 206, 410, 24);
-            Controls.Add(focusBox);
+            focusBox.Margin = new Padding(3, 3, 3, 14);
+            t.Controls.Add(focusBox);
 
-            Button ok = new Button();
-            ok.Text = "Save";
-            ok.SetBounds(232, 252, 92, 32);
-            ok.DialogResult = DialogResult.OK;
-            Controls.Add(ok);
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            buttons.AutoSize = true;
+            buttons.Dock = DockStyle.Fill;
+            buttons.Margin = new Padding(0);
 
             Button cancel = new Button();
             cancel.Text = "Cancel";
-            cancel.SetBounds(332, 252, 92, 32);
+            cancel.AutoSize = true;
+            cancel.MinimumSize = new Size(90, 30);
             cancel.DialogResult = DialogResult.Cancel;
-            Controls.Add(cancel);
+            buttons.Controls.Add(cancel);
+
+            Button ok = new Button();
+            ok.Text = "Save";
+            ok.AutoSize = true;
+            ok.MinimumSize = new Size(90, 30);
+            ok.DialogResult = DialogResult.OK;
+            buttons.Controls.Add(ok);
+
+            t.Controls.Add(buttons);
+            Controls.Add(t);
 
             AcceptButton = ok;
             CancelButton = cancel;
-            UpdateLabels();
+            UpdateLabel();
 
             FormClosing += (s, e) =>
             {
                 ViewOpacity = viewBar.Value * 5;
-                SelOpacity = selBar.Value * 5;
                 KeepFocus = focusBox.Checked;
             };
         }
 
-        TrackBar MakeBar(int x, int y, int pct)
+        void UpdateLabel()
         {
-            TrackBar b = new TrackBar();
-            b.Minimum = 2;   // 10%
-            b.Maximum = 20;  // 100%
-            b.TickFrequency = 2;
-            b.SmallChange = 1;
-            b.LargeChange = 2;
-            b.Value = Math.Max(2, Math.Min(20, (int)Math.Round(pct / 5.0)));
-            b.SetBounds(x, y, 410, 45);
-            Controls.Add(b);
-            return b;
-        }
-
-        void UpdateLabels()
-        {
-            viewLbl.Text = "Whole screenshot: " + (viewBar.Value * 5) + "%";
-            selLbl.Text = "Area you're marking: " + (selBar.Value * 5) + "%";
+            viewLbl.Text = "Screenshot visibility: " + (viewBar.Value * 5) + "%";
         }
     }
 
@@ -1174,8 +1203,8 @@ namespace TibiaSnap
             seeCustom = new ToolStripMenuItem("Custom...");
             seeCustom.Click += (s, e) =>
             {
-                using (SeeThroughForm f = new SeeThroughForm(settings.ViewOpacity, settings.SelOpacity, settings.KeepFocus))
-                    if (f.ShowDialog() == DialogResult.OK) SetSeeThrough(f.ViewOpacity, f.SelOpacity, f.KeepFocus);
+                using (SeeThroughForm f = new SeeThroughForm(settings.ViewOpacity, settings.KeepFocus))
+                    if (f.ShowDialog() == DialogResult.OK) SetSeeThrough(f.ViewOpacity, 100, f.KeepFocus);
             };
             seeMenu.DropDownItems.Add(seeOff);
             seeMenu.DropDownItems.Add(seePlay);
@@ -1255,7 +1284,7 @@ namespace TibiaSnap
             seePlay.Checked = play;
             seeCustom.Checked = !off && !play;
             seeCustom.Text = seeCustom.Checked
-                ? "Custom... (" + settings.ViewOpacity + "% / marked " + settings.SelOpacity + "%" + (settings.KeepFocus ? ", keys stay in Tibia" : "") + ")"
+                ? "Custom... (" + settings.ViewOpacity + "%, marked area 100%" + (settings.KeepFocus ? ", keys stay in Tibia" : "") + ")"
                 : "Custom...";
         }
 
