@@ -22,7 +22,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("TibiaSnap")]
 [assembly: System.Reflection.AssemblyProduct("TibiaSnap")]
-[assembly: System.Reflection.AssemblyVersion("1.3.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
 
 namespace TibiaSnap
 {
@@ -33,6 +33,11 @@ namespace TibiaSnap
     {
         public static readonly string[][] Entries =
         {
+            new string[] { "1.4.0",
+                "New: see-through viewer (tray > See-through viewer). Watch your hunt through the screenshot while you crop.",
+                "The area you're marking stays fully visible, the rest is see-through. What you copy is always the normal 100% screenshot.",
+                "'Play mode' preset: screenshot at 40%, marked area 100%, and your keyboard stays in Tibia so your hotkeys keep working while you crop.",
+                "Or set both values yourself under 'Custom...'." },
             new string[] { "1.3.0",
                 "Opens a lot faster: no more slow folder scan on every key press, and the screenshot is prepared quicker.",
                 "New: choose what happens when you press the key (tray > When I press the key): open the crop window, just copy the whole screenshot to your clipboard, or keep it for later so nothing pops up mid-hunt.",
@@ -228,6 +233,9 @@ namespace TibiaSnap
         public string CropMode = "builtin";   // builtin | snip | none
         public bool SaveCrops = true;
         public string OnPress = "viewer";     // viewer | copy | later
+        public int ViewOpacity = 100;         // see-through viewer: whole screenshot %
+        public int SelOpacity = 100;          // marked area %
+        public bool KeepFocus = false;        // keyboard stays in Tibia while cropping
         public string Monitor = "mouse";      // mouse | primary | \\.\DISPLAYn
         public Keys HotkeyKey = Keys.End;
         public Keys HotkeyMods = Keys.None;
@@ -282,6 +290,9 @@ namespace TibiaSnap
                         else if (key == "AutoSnip") legacyNoSnip = val == "0";
                         else if (key == "SaveCrops") s.SaveCrops = val == "1";
                         else if (key == "OnPress" && (val == "viewer" || val == "copy" || val == "later")) s.OnPress = val;
+                        else if (key == "ViewOpacity") { if (int.TryParse(val, out n)) s.ViewOpacity = Math.Max(10, Math.Min(100, n)); }
+                        else if (key == "SelOpacity") { if (int.TryParse(val, out n)) s.SelOpacity = Math.Max(10, Math.Min(100, n)); }
+                        else if (key == "KeepFocus") s.KeepFocus = val == "1";
                         else if (key == "Monitor" && val.Length > 0) s.Monitor = val;
                         else if (key == "HotkeyKey") { if (int.TryParse(val, out n) && n > 0) s.HotkeyKey = (Keys)n; }
                         else if (key == "HotkeyMods") { if (int.TryParse(val, out n)) s.HotkeyMods = (Keys)n & Keys.Modifiers; }
@@ -305,6 +316,9 @@ namespace TibiaSnap
                     "CropMode=" + CropMode,
                     "SaveCrops=" + (SaveCrops ? "1" : "0"),
                     "OnPress=" + OnPress,
+                    "ViewOpacity=" + ViewOpacity,
+                    "SelOpacity=" + SelOpacity,
+                    "KeepFocus=" + (KeepFocus ? "1" : "0"),
                     "Monitor=" + Monitor,
                     "HotkeyKey=" + (int)HotkeyKey,
                     "HotkeyMods=" + (int)HotkeyMods
@@ -392,6 +406,10 @@ namespace TibiaSnap
         readonly bool showHint;
         readonly bool saveCrops;
         readonly Action<string> notify;
+        readonly bool keepFocus;   // keyboard stays in Tibia while the viewer is open
+        readonly bool seeThrough;  // some transparency is on
+        readonly int selOpacity;
+        SelWindow selWin;          // solid copy of the marked area, on top of the see-through viewer
 
         bool dragging;
         bool hintVisible = true;
@@ -404,13 +422,32 @@ namespace TibiaSnap
         static readonly SolidBrush PillBrush = new SolidBrush(Color.FromArgb(190, 20, 20, 24));
         static readonly Pen SelPen = new Pen(Color.FromArgb(255, 232, 178, 54), 2f);
 
-        public ViewerForm(PreparedImage img, string cropMode, bool saveCrops, Action<string> notify)
+        const int WS_EX_NOACTIVATE = 0x08000000;
+
+        protected override bool ShowWithoutActivation { get { return keepFocus; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                if (keepFocus) cp.ExStyle |= WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        public ViewerForm(PreparedImage img, string cropMode, bool saveCrops, Action<string> notify,
+                          int viewOpacity, int selOpacity, bool keepFocus)
         {
             this.img = img;
             this.cropEnabled = cropMode == "builtin";
             this.showHint = cropMode != "snip"; // hint would end up in the Snipping Tool shot
             this.saveCrops = saveCrops;
             this.notify = notify;
+            this.keepFocus = keepFocus;
+            this.selOpacity = selOpacity;
+            this.seeThrough = viewOpacity < 100 || selOpacity < 100;
+            if (viewOpacity < 100) Opacity = viewOpacity / 100.0;
 
             Text = "TibiaSnap - " + System.IO.Path.GetFileName(img.Path);
             FormBorderStyle = FormBorderStyle.None;
@@ -446,21 +483,28 @@ namespace TibiaSnap
 
             if (dragging && sel.Width > 0 && sel.Height > 0)
             {
-                int W = ClientSize.Width, H = ClientSize.Height;
-                g.FillRectangle(Shade, 0, 0, W, sel.Top);
-                g.FillRectangle(Shade, 0, sel.Bottom, W, H - sel.Bottom);
-                g.FillRectangle(Shade, 0, sel.Top, sel.Left, sel.Height);
-                g.FillRectangle(Shade, sel.Right, sel.Top, W - sel.Right, sel.Height);
-                g.DrawRectangle(SelPen, sel.X, sel.Y, sel.Width - 1, sel.Height - 1);
+                if (!seeThrough)
+                {
+                    // solid mode: darken everything outside the box
+                    int W = ClientSize.Width, H = ClientSize.Height;
+                    g.FillRectangle(Shade, 0, 0, W, sel.Top);
+                    g.FillRectangle(Shade, 0, sel.Bottom, W, H - sel.Bottom);
+                    g.FillRectangle(Shade, 0, sel.Top, sel.Left, sel.Height);
+                    g.FillRectangle(Shade, sel.Right, sel.Top, W - sel.Right, sel.Height);
+                    g.DrawRectangle(SelPen, sel.X, sel.Y, sel.Width - 1, sel.Height - 1);
+                }
+                // (see-through mode: the solid SelWindow on top shows the box + border)
 
                 Rectangle src = ToSource(sel);
                 DrawPill(g, src.Width + " x " + src.Height, SizeFont, new Point(sel.Left, sel.Bottom + 6), false);
             }
             else if (showHint && hintVisible)
             {
+                string close = keepFocus ? "Right-click = close" : "Esc = close";
+                string whole = keepFocus ? "Double-click = whole screenshot" : "Enter = whole screenshot";
                 string hint = cropEnabled
-                    ? "Drag to copy a part   \u00B7   Enter = whole screenshot   \u00B7   Esc = close"
-                    : "Enter = copy screenshot   \u00B7   Esc = close";
+                    ? "Drag to copy a part   \u00B7   " + whole + "   \u00B7   " + close
+                    : (keepFocus ? "Double-click = copy screenshot" : "Enter = copy screenshot") + "   \u00B7   " + close;
                 DrawPill(g, hint, HintFont, new Point(ClientSize.Width / 2, 18), true);
             }
         }
@@ -506,7 +550,12 @@ namespace TibiaSnap
                 hintVisible = false;
                 dragStart = e.Location;
                 sel = Rectangle.Empty;
-                Invalidate(); // whole screen gets shaded once
+                if (seeThrough && selWin == null)
+                {
+                    selWin = new SelWindow(img, selOpacity);
+                    selWin.Owner = this; // always stays above the viewer
+                }
+                Invalidate(); // whole screen changes once (shade / hint gone)
             }
         }
 
@@ -516,6 +565,8 @@ namespace TibiaSnap
             if (!dragging) return;
             Rectangle old = sel;
             sel = MakeSel(dragStart, e.Location);
+            if (selWin != null)
+                selWin.Place(sel, new Rectangle(Left + sel.X, Top + sel.Y, sel.Width, sel.Height));
             // only repaint the area that changed (+ room for the size label)
             Rectangle u = old.IsEmpty ? sel : sel.IsEmpty ? old : Rectangle.Union(old, sel);
             Invalidate(new Rectangle(u.X - 4, u.Y - 4, u.Width + 160, u.Height + 50));
@@ -526,6 +577,7 @@ namespace TibiaSnap
             base.OnMouseUp(e);
             if (e.Button != MouseButtons.Left || !dragging) return;
             dragging = false;
+            if (selWin != null) selWin.Hide();
             if (sel.Width >= 4 && sel.Height >= 4)
             {
                 Rectangle src = ToSource(sel);
@@ -561,6 +613,7 @@ namespace TibiaSnap
         // clipboard (as image + PNG for Discord etc.), then save in the background
         void Finish(Bitmap result)
         {
+            if (selWin != null) selWin.Hide();
             Hide(); // get out of your way right away, copying can take a moment for big shots
             bool copied = ClipboardHelper.SetImage(result);
             Close();
@@ -590,8 +643,163 @@ namespace TibiaSnap
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            if (selWin != null && !selWin.IsDisposed) selWin.Close();
             img.Dispose();
             base.OnFormClosed(e);
+        }
+    }
+
+    // The marked area, drawn in its own window so it can be less transparent (or solid)
+    // than the rest of the see-through viewer. Click-through and never takes focus.
+    class SelWindow : Form
+    {
+        const int WS_EX_TRANSPARENT = 0x20, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+        readonly PreparedImage img;
+        Rectangle sel;
+        static readonly Pen Border = new Pen(Color.FromArgb(255, 232, 178, 54), 2f);
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        public SelWindow(PreparedImage img, int opacityPct)
+        {
+            this.img = img;
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            BackColor = Color.Black;
+            MinimumSize = new Size(1, 1);
+            if (opacityPct < 100) Opacity = opacityPct / 100.0;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque, true);
+        }
+
+        // selClient = box inside the viewer, screenRect = same box in screen coordinates
+        public void Place(Rectangle selClient, Rectangle screenRect)
+        {
+            sel = selClient;
+            if (screenRect.Width < 2 || screenRect.Height < 2)
+            {
+                if (Visible) Hide();
+                return;
+            }
+            Bounds = screenRect;
+            if (!Visible) Show();
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Rectangle ir = img.ImageRect;
+            g.CompositingMode = CompositingMode.SourceCopy;
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            g.DrawImage(img.Scaled, new Rectangle(0, 0, sel.Width, sel.Height),
+                new Rectangle(sel.X - ir.X, sel.Y - ir.Y, sel.Width, sel.Height), GraphicsUnit.Pixel);
+            g.CompositingMode = CompositingMode.SourceOver;
+            g.PixelOffsetMode = PixelOffsetMode.Default;
+            g.DrawRectangle(Border, 1, 1, ClientSize.Width - 2, ClientSize.Height - 2);
+        }
+    }
+
+    // ======================================================================
+    // Custom see-through settings
+    // ======================================================================
+    class SeeThroughForm : Form
+    {
+        public int ViewOpacity, SelOpacity;
+        public bool KeepFocus;
+        readonly TrackBar viewBar, selBar;
+        readonly Label viewLbl, selLbl;
+        readonly CheckBox focusBox;
+
+        public SeeThroughForm(int view, int sel, bool keepFocus)
+        {
+            Text = "TibiaSnap - See-through viewer";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterScreen;
+            TopMost = true;
+            AutoScaleMode = AutoScaleMode.Font;
+            Font = new Font("Segoe UI", 9.5f);
+            ClientSize = new Size(440, 300);
+
+            Label info = new Label();
+            info.Text = "How visible the screenshot is. Lower = you see more of Tibia behind it.\nWhat you copy is always the full, normal screenshot.";
+            info.SetBounds(16, 12, 410, 40);
+            Controls.Add(info);
+
+            viewLbl = new Label();
+            viewLbl.SetBounds(16, 60, 410, 20);
+            Controls.Add(viewLbl);
+            viewBar = MakeBar(16, 82, view);
+            viewBar.ValueChanged += (s, e) => UpdateLabels();
+
+            selLbl = new Label();
+            selLbl.SetBounds(16, 132, 410, 20);
+            Controls.Add(selLbl);
+            selBar = MakeBar(16, 154, sel);
+            selBar.ValueChanged += (s, e) => UpdateLabels();
+
+            focusBox = new CheckBox();
+            focusBox.Text = "Keep my keyboard in Tibia while cropping (hotkeys keep working)";
+            focusBox.Checked = keepFocus;
+            focusBox.SetBounds(16, 206, 410, 24);
+            Controls.Add(focusBox);
+
+            Button ok = new Button();
+            ok.Text = "Save";
+            ok.SetBounds(232, 252, 92, 32);
+            ok.DialogResult = DialogResult.OK;
+            Controls.Add(ok);
+
+            Button cancel = new Button();
+            cancel.Text = "Cancel";
+            cancel.SetBounds(332, 252, 92, 32);
+            cancel.DialogResult = DialogResult.Cancel;
+            Controls.Add(cancel);
+
+            AcceptButton = ok;
+            CancelButton = cancel;
+            UpdateLabels();
+
+            FormClosing += (s, e) =>
+            {
+                ViewOpacity = viewBar.Value * 5;
+                SelOpacity = selBar.Value * 5;
+                KeepFocus = focusBox.Checked;
+            };
+        }
+
+        TrackBar MakeBar(int x, int y, int pct)
+        {
+            TrackBar b = new TrackBar();
+            b.Minimum = 2;   // 10%
+            b.Maximum = 20;  // 100%
+            b.TickFrequency = 2;
+            b.SmallChange = 1;
+            b.LargeChange = 2;
+            b.Value = Math.Max(2, Math.Min(20, (int)Math.Round(pct / 5.0)));
+            b.SetBounds(x, y, 410, 45);
+            Controls.Add(b);
+            return b;
+        }
+
+        void UpdateLabels()
+        {
+            viewLbl.Text = "Whole screenshot: " + (viewBar.Value * 5) + "%";
+            selLbl.Text = "Area you're marking: " + (selBar.Value * 5) + "%";
         }
     }
 
@@ -819,7 +1027,7 @@ namespace TibiaSnap
         Settings settings;
 
         ToolStripMenuItem enabledItem, viewerItem, saveCropsItem, autostartItem, hotkeyItem;
-        ToolStripMenuItem cropMenu, monitorMenu, pressMenu;
+        ToolStripMenuItem cropMenu, monitorMenu, pressMenu, seeMenu, seeOff, seePlay, seeCustom;
 
         ViewerForm currentViewer;
         bool keyWasDown;
@@ -921,6 +1129,24 @@ namespace TibiaSnap
             monitorMenu = new ToolStripMenuItem("Open on monitor");
             monitorMenu.DropDownItems.Add("..."); // placeholder so the arrow shows
             menu.Items.Add(monitorMenu);
+
+            // see-through viewer
+            seeMenu = new ToolStripMenuItem("See-through viewer");
+            seeOff = new ToolStripMenuItem("Off - solid (100% / 100%)");
+            seeOff.Click += (s, e) => SetSeeThrough(100, 100, false);
+            seePlay = new ToolStripMenuItem("Play mode - see the game behind it (40% / marked 100%, keys stay in Tibia)");
+            seePlay.Click += (s, e) => SetSeeThrough(PlayView, PlaySel, true);
+            seeCustom = new ToolStripMenuItem("Custom...");
+            seeCustom.Click += (s, e) =>
+            {
+                using (SeeThroughForm f = new SeeThroughForm(settings.ViewOpacity, settings.SelOpacity, settings.KeepFocus))
+                    if (f.ShowDialog() == DialogResult.OK) SetSeeThrough(f.ViewOpacity, f.SelOpacity, f.KeepFocus);
+            };
+            seeMenu.DropDownItems.Add(seeOff);
+            seeMenu.DropDownItems.Add(seePlay);
+            seeMenu.DropDownItems.Add(seeCustom);
+            menu.Items.Add(seeMenu);
+            UpdateSeeChecks();
             menu.Opening += (s, e) => RebuildMonitorMenu();
 
             saveCropsItem = new ToolStripMenuItem("Also save crops to Pictures\\TibiaSnap");
@@ -973,6 +1199,29 @@ namespace TibiaSnap
                 }
             };
             cropMenu.DropDownItems.Add(it);
+        }
+
+        const int PlayView = 40, PlaySel = 100;
+
+        void SetSeeThrough(int view, int sel, bool keep)
+        {
+            settings.ViewOpacity = view;
+            settings.SelOpacity = sel;
+            settings.KeepFocus = keep;
+            settings.Save();
+            UpdateSeeChecks();
+        }
+
+        void UpdateSeeChecks()
+        {
+            bool off = settings.ViewOpacity == 100 && settings.SelOpacity == 100 && !settings.KeepFocus;
+            bool play = settings.ViewOpacity == PlayView && settings.SelOpacity == PlaySel && settings.KeepFocus;
+            seeOff.Checked = off;
+            seePlay.Checked = play;
+            seeCustom.Checked = !off && !play;
+            seeCustom.Text = seeCustom.Checked
+                ? "Custom... (" + settings.ViewOpacity + "% / marked " + settings.SelOpacity + "%" + (settings.KeepFocus ? ", keys stay in Tibia" : "") + ")"
+                : "Custom...";
         }
 
         void AddPressOption(string label, string value)
@@ -1236,8 +1485,14 @@ namespace TibiaSnap
             try
             {
                 if (currentViewer != null && !currentViewer.IsDisposed) currentViewer.Close();
+                // the Snipping Tool would capture Tibia as black through a see-through viewer
+                bool snip = settings.CropMode == "snip";
+                int viewOp = snip ? 100 : settings.ViewOpacity;
+                int selOp = snip ? 100 : settings.SelOpacity;
+                bool keep = !snip && settings.KeepFocus;
+
                 currentViewer = new ViewerForm(p, settings.CropMode, settings.SaveCrops,
-                    msg => ShowTip(msg, ToolTipIcon.Info));
+                    msg => ShowTip(msg, ToolTipIcon.Info), viewOp, selOp, keep);
                 if (settings.CropMode == "snip")
                     currentViewer.Shown += (s, e) =>
                     {
@@ -1247,7 +1502,7 @@ namespace TibiaSnap
                         t.Start();
                     };
                 currentViewer.Show();
-                currentViewer.Activate();
+                if (!keep) currentViewer.Activate();
             }
             catch (Exception ex)
             {
