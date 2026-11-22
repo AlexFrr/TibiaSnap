@@ -22,7 +22,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("TibiaSnap")]
 [assembly: System.Reflection.AssemblyProduct("TibiaSnap")]
-[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.2.0")]
 
 namespace TibiaSnap
 {
@@ -33,6 +33,8 @@ namespace TibiaSnap
     {
         public static readonly string[][] Entries =
         {
+            new string[] { "1.4.2",
+                "Play mode is now the default: the screenshot opens see-through (40%), the marked area stays 100%, and your keys stay in Tibia. You can switch back to solid under tray > See-through viewer." },
             new string[] { "1.4.1",
                 "See-through viewer now lines up exactly with your Tibia game window, so the screenshot sits right on top of the live game (it opens on the monitor Tibia is on)." },
             new string[] { "1.4.0",
@@ -235,9 +237,10 @@ namespace TibiaSnap
         public string CropMode = "builtin";   // builtin | snip | none
         public bool SaveCrops = true;
         public string OnPress = "viewer";     // viewer | copy | later
-        public int ViewOpacity = 100;         // see-through viewer: whole screenshot %
+        public int ViewOpacity = 40;          // see-through viewer: whole screenshot %  (default = play mode)
         public int SelOpacity = 100;          // marked area %
-        public bool KeepFocus = false;        // keyboard stays in Tibia while cropping
+        public bool KeepFocus = true;         // keyboard stays in Tibia while cropping
+        public bool PlayDefaultApplied = false;
         public string Monitor = "mouse";      // mouse | primary | \\.\DISPLAYn
         public Keys HotkeyKey = Keys.End;
         public Keys HotkeyMods = Keys.None;
@@ -295,6 +298,7 @@ namespace TibiaSnap
                         else if (key == "ViewOpacity") { if (int.TryParse(val, out n)) s.ViewOpacity = Math.Max(10, Math.Min(100, n)); }
                         else if (key == "SelOpacity") { if (int.TryParse(val, out n)) s.SelOpacity = Math.Max(10, Math.Min(100, n)); }
                         else if (key == "KeepFocus") s.KeepFocus = val == "1";
+                        else if (key == "PlayDefaultApplied") s.PlayDefaultApplied = val == "1";
                         else if (key == "Monitor" && val.Length > 0) s.Monitor = val;
                         else if (key == "HotkeyKey") { if (int.TryParse(val, out n) && n > 0) s.HotkeyKey = (Keys)n; }
                         else if (key == "HotkeyMods") { if (int.TryParse(val, out n)) s.HotkeyMods = (Keys)n & Keys.Modifiers; }
@@ -303,6 +307,19 @@ namespace TibiaSnap
             }
             catch { }
             if (!hasCropMode && legacyNoSnip) s.CropMode = "none";
+            // one time: older versions saved 'solid' as the default -> switch to play mode
+            // (custom values someone picked themselves are kept)
+            if (!s.PlayDefaultApplied)
+            {
+                if (s.ViewOpacity == 100 && s.SelOpacity == 100 && !s.KeepFocus)
+                {
+                    s.ViewOpacity = 40;
+                    s.SelOpacity = 100;
+                    s.KeepFocus = true;
+                }
+                s.PlayDefaultApplied = true;
+                s.Save();
+            }
             return s;
         }
 
@@ -321,6 +338,7 @@ namespace TibiaSnap
                     "ViewOpacity=" + ViewOpacity,
                     "SelOpacity=" + SelOpacity,
                     "KeepFocus=" + (KeepFocus ? "1" : "0"),
+                    "PlayDefaultApplied=" + (PlayDefaultApplied ? "1" : "0"),
                     "Monitor=" + Monitor,
                     "HotkeyKey=" + (int)HotkeyKey,
                     "HotkeyMods=" + (int)HotkeyMods
@@ -1151,7 +1169,7 @@ namespace TibiaSnap
             seeMenu = new ToolStripMenuItem("See-through viewer");
             seeOff = new ToolStripMenuItem("Off - solid (100% / 100%)");
             seeOff.Click += (s, e) => SetSeeThrough(100, 100, false);
-            seePlay = new ToolStripMenuItem("Play mode - see the game behind it (40% / marked 100%, keys stay in Tibia)");
+            seePlay = new ToolStripMenuItem("Play mode (default) - see the game behind it (40% / marked 100%, keys stay in Tibia)");
             seePlay.Click += (s, e) => SetSeeThrough(PlayView, PlaySel, true);
             seeCustom = new ToolStripMenuItem("Custom...");
             seeCustom.Click += (s, e) =>
