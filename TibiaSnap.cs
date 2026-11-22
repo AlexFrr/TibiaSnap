@@ -22,7 +22,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("TibiaSnap")]
 [assembly: System.Reflection.AssemblyProduct("TibiaSnap")]
-[assembly: System.Reflection.AssemblyVersion("1.4.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.4.1.0")]
 
 namespace TibiaSnap
 {
@@ -33,6 +33,8 @@ namespace TibiaSnap
     {
         public static readonly string[][] Entries =
         {
+            new string[] { "1.4.1",
+                "See-through viewer now lines up exactly with your Tibia game window, so the screenshot sits right on top of the live game (it opens on the monitor Tibia is on)." },
             new string[] { "1.4.0",
                 "New: see-through viewer (tray > See-through viewer). Watch your hunt through the screenshot while you crop.",
                 "The area you're marking stays fully visible, the rest is see-through. What you copy is always the normal 100% screenshot.",
@@ -337,19 +339,33 @@ namespace TibiaSnap
         public Bitmap Scaled;        // already fitted to the screen, so drawing is instant
         public Rectangle ScreenBounds;
         public Rectangle ImageRect;  // where Scaled sits inside the window
-        public float Scale;
+        public float ScaleX, ScaleY;
         public string Path;
 
-        public static PreparedImage Load(string path, Rectangle screen)
+        // target = where to put the image inside 'screen' (e.g. exactly over Tibia's game area);
+        // Rectangle.Empty = fit to the whole screen
+        public static PreparedImage Load(string path, Rectangle screen, Rectangle target)
         {
             Bitmap orig = null;
             try
             {
                 orig = LoadOriginal(path);
 
-                float scale = Math.Min((float)screen.Width / orig.Width, (float)screen.Height / orig.Height);
-                int w = Math.Max(1, (int)Math.Round(orig.Width * scale));
-                int h = Math.Max(1, (int)Math.Round(orig.Height * scale));
+                int w, h;
+                Rectangle imageRect;
+                if (target.Width > 0 && target.Height > 0)
+                {
+                    w = target.Width;
+                    h = target.Height;
+                    imageRect = target;
+                }
+                else
+                {
+                    float fit = Math.Min((float)screen.Width / orig.Width, (float)screen.Height / orig.Height);
+                    w = Math.Max(1, (int)Math.Round(orig.Width * fit));
+                    h = Math.Max(1, (int)Math.Round(orig.Height * fit));
+                    imageRect = new Rectangle((screen.Width - w) / 2, (screen.Height - h) / 2, w, h);
+                }
 
                 Bitmap scaled = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
                 using (Graphics g = Graphics.FromImage(scaled))
@@ -366,10 +382,11 @@ namespace TibiaSnap
                 PreparedImage p = new PreparedImage();
                 p.Original = orig;
                 p.Scaled = scaled;
-                p.Scale = scale;
+                p.ScaleX = (float)w / orig.Width;
+                p.ScaleY = (float)h / orig.Height;
                 p.Path = path;
                 p.ScreenBounds = screen;
-                p.ImageRect = new Rectangle((screen.Width - w) / 2, (screen.Height - h) / 2, w, h);
+                p.ImageRect = imageRect;
                 return p;
             }
             catch
@@ -523,10 +540,10 @@ namespace TibiaSnap
         Rectangle ToSource(Rectangle s)
         {
             Rectangle ir = img.ImageRect;
-            int x1 = (int)Math.Floor((s.Left - ir.X) / img.Scale);
-            int y1 = (int)Math.Floor((s.Top - ir.Y) / img.Scale);
-            int x2 = (int)Math.Ceiling((s.Right - ir.X) / img.Scale);
-            int y2 = (int)Math.Ceiling((s.Bottom - ir.Y) / img.Scale);
+            int x1 = (int)Math.Floor((s.Left - ir.X) / img.ScaleX);
+            int y1 = (int)Math.Floor((s.Top - ir.Y) / img.ScaleY);
+            int x2 = (int)Math.Ceiling((s.Right - ir.X) / img.ScaleX);
+            int y2 = (int)Math.Ceiling((s.Bottom - ir.Y) / img.ScaleY);
             x1 = Math.Max(0, Math.Min(x1, img.Original.Width));
             y1 = Math.Max(0, Math.Min(y1, img.Original.Height));
             x2 = Math.Max(0, Math.Min(x2, img.Original.Width));
@@ -1286,10 +1303,57 @@ namespace TibiaSnap
                 busy = true;
                 DateTime pressedUtc = DateTime.UtcNow;
                 string folder = settings.Folder;
-                Rectangle bounds = TargetScreenBounds(settings.Monitor);
-                ThreadPool.QueueUserWorkItem(_ => WaitAndOpen(folder, pressedUtc, bounds));
+                RememberTibiaArea();
+                Rectangle screen, target;
+                GetPlacement(out screen, out target);
+                ThreadPool.QueueUserWorkItem(_ => WaitAndOpen(folder, pressedUtc, screen, target));
             }
             keyWasDown = down;
+        }
+
+        // ---- lining the see-through viewer up with the game ----
+
+        [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr hWnd, out RECT r);
+        [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr hWnd, ref POINT p);
+
+        Rectangle lastTibiaArea = Rectangle.Empty; // Tibia's game area on screen at the last key press
+
+        // only asks Windows where the Tibia window's inside area is (like any window manager does)
+        void RememberTibiaArea()
+        {
+            try
+            {
+                IntPtr h = GetForegroundWindow();
+                RECT r;
+                if (h == IntPtr.Zero || !GetClientRect(h, out r)) return;
+                POINT p = new POINT();
+                if (!ClientToScreen(h, ref p)) return;
+                int w = r.Right - r.Left, ht = r.Bottom - r.Top;
+                if (w > 50 && ht > 50) lastTibiaArea = new Rectangle(p.X, p.Y, w, ht);
+            }
+            catch { }
+        }
+
+        bool SeeThroughActive
+        {
+            get { return settings.CropMode != "snip" && (settings.ViewOpacity < 100 || settings.SelOpacity < 100); }
+        }
+
+        // see-through: put the screenshot exactly over Tibia's game area so it lines up.
+        // solid: fit it to the chosen monitor like before.
+        void GetPlacement(out Rectangle screen, out Rectangle target)
+        {
+            target = Rectangle.Empty;
+            if (SeeThroughActive && !lastTibiaArea.IsEmpty)
+            {
+                screen = Screen.FromRectangle(lastTibiaArea).Bounds;
+                target = new Rectangle(lastTibiaArea.X - screen.X, lastTibiaArea.Y - screen.Y,
+                                       lastTibiaArea.Width, lastTibiaArea.Height);
+                return;
+            }
+            screen = TargetScreenBounds(settings.Monitor);
         }
 
         static bool TibiaIsActive()
@@ -1381,7 +1445,7 @@ namespace TibiaSnap
 
         // Finds the screenshot for this key press: any image written from 3s before
         // the press on (Tibia can be faster than us), except the one opened last time.
-        void WaitAndOpen(string folder, DateTime pressedUtc, Rectangle screen)
+        void WaitAndOpen(string folder, DateTime pressedUtc, Rectangle screen, Rectangle target)
         {
             try
             {
@@ -1420,7 +1484,7 @@ namespace TibiaSnap
                 if (found == null) return; // nothing new (e.g. Tibia ignored the key) - stay quiet
 
                 lastOpened = found;
-                OpenImage(found, screen, settings.OnPress);
+                OpenImage(found, screen, target, settings.OnPress);
             }
             catch (Exception ex)
             {
@@ -1433,7 +1497,7 @@ namespace TibiaSnap
         }
 
         // worker thread. mode: viewer | copy | later
-        void OpenImage(string path, Rectangle screen, string mode)
+        void OpenImage(string path, Rectangle screen, Rectangle target, string mode)
         {
             if (mode == "later")
             {
@@ -1472,7 +1536,7 @@ namespace TibiaSnap
             Exception last = null;
             for (int i = 0; i < 120 && p == null; i++) // Tibia may still be writing it
             {
-                try { p = PreparedImage.Load(path, screen); }
+                try { p = PreparedImage.Load(path, screen, target); }
                 catch (Exception ex) { last = ex; Thread.Sleep(25); }
             }
             if (p == null) throw new Exception("couldn't read the screenshot (" + (last != null ? last.Message : "?") + ")");
@@ -1522,10 +1586,11 @@ namespace TibiaSnap
             string f = NewestImage(settings.Folder, out unused);
             if (f == null) { ShowTip("No screenshots in that folder yet.", ToolTipIcon.Info); return; }
             lastOpened = f;
-            Rectangle bounds = TargetScreenBounds(settings.Monitor);
+            Rectangle screen, target;
+            GetPlacement(out screen, out target);
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try { OpenImage(f, bounds, "viewer"); }
+                try { OpenImage(f, screen, target, "viewer"); }
                 catch (Exception ex) { ShowTip("Something went wrong: " + ex.Message, ToolTipIcon.Error); }
             });
         }
